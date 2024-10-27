@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arc Project</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            border-radius: 8px;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background: #5cb85c;
+            color: white;
+            border: none;
+            padding: 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            width: 100%;
+        }
+        button:hover {
+            background: #4cae4c;
+        }
+        .response {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Arc Project</h1>
+        <input type="email" id="email" placeholder="Enter your email" />
+        <button id="login-btn">Login</button>
+
+        <div class="response" id="response" style="display:none;"></div>
+
+        <h3>Arc-Core</h3>
+        <input type="text" id="arc-core-input" placeholder="Enter prompt for Arc-Core" />
+        <button id="arc-core-btn">Get Response</button>
+
+        <h3>Arc-Plus</h3>
+        <input type="text" id="arc-plus-input" placeholder="Enter prompt for Arc-Plus" />
+        <button id="arc-plus-btn">Get Response</button>
+
+        <button id="subscribe-btn">Subscribe to Arc-Plus (£0.50/week)</button>
+    </div>
+
+    <script>
+        const loginBtn = document.getElementById('login-btn');
+        const arcCoreInput = document.getElementById('arc-core-input');
+        const arcCoreBtn = document.getElementById('arc-core-btn');
+        const arcPlusInput = document.getElementById('arc-plus-input');
+        const arcPlusBtn = document.getElementById('arc-plus-btn');
+        const subscribeBtn = document.getElementById('subscribe-btn');
+        const responseDiv = document.getElementById('response');
+
+        loginBtn.onclick = async () => {
+            const email = document.getElementById('email').value;
+            const res = await fetch('/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email })
+            });
+            const data = await res.json();
+            alert(data.message);
+        };
+
+        arcCoreBtn.onclick = async () => {
+            const prompt = arcCoreInput.value;
+            const res = await fetch('/api/arc-core', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt })
+            });
+            const data = await res.json();
+            responseDiv.innerText = JSON.stringify(data);
+            responseDiv.style.display = 'block';
+        };
+
+        arcPlusBtn.onclick = async () => {
+            const prompt = arcPlusInput.value;
+            const res = await fetch('/api/arc-plus', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt })
+            });
+            const data = await res.json();
+            responseDiv.innerText = JSON.stringify(data);
+            responseDiv.style.display = 'block';
+        };
+
+        subscribeBtn.onclick = async () => {
+            const res = await fetch('/create-payment', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const data = await res.json();
+            if (data.id) {
+                // Redirect to Stripe Checkout
+                window.location.href = `https://checkout.stripe.com/pay/${data.id}`;
+            } else {
+                alert('Subscription error: ' + data);
+            }
+        };
+    </script>
+</body>
+</html>
