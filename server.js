@@ -1,45 +1,70 @@
-// server.js
 const express = require('express');
 const session = require('express-session');
 const axios = require('axios');
-const mongoose = require('mongoose');
+const sqlite3 = require('sqlite3').verbose();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const path = require('path');
 require('dotenv').config();
 
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname)));
+app.use(express.static(path.join(__dirname, 'public')));
 
-// MongoDB connection
-mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-    .then(() => console.log('MongoDB connected'))
-    .catch((err) => console.log('MongoDB connection error:', err));
+// Set up SQLite database
+const db = new sqlite3.Database('./database.sqlite', (err) => {
+    if (err) return console.error(err.message);
+    console.log('Connected to the SQLite database.');
 
-// Define User schema
-const userSchema = new mongoose.Schema({
-    email: { type: String, required: true, unique: true },
-    isArcPlus: { type: Boolean, default: false },
-    stripeCustomerId: String,
-    stripeSubscriptionId: String
+    // Create Users table
+    db.run(`
+        CREATE TABLE IF NOT EXISTS users (
+            email TEXT PRIMARY KEY,
+            isArcPlus INTEGER DEFAULT 0,
+            stripeCustomerId TEXT,
+            stripeSubscriptionId TEXT
+        )
+    `);
 });
-const User = mongoose.model('User', userSchema);
 
 // Express session setup
 app.use(session({
-    secret: 'your_secret_key', // Replace with a strong secret key
+    secret: 'your_secret_key',
     resave: false,
     saveUninitialized: true,
 }));
+
+// Helper function to get user from DB
+const getUserByEmail = (email) => new Promise((resolve, reject) => {
+    db.get('SELECT * FROM users WHERE email = ?', [email], (err, row) => {
+        if (err) return reject(err);
+        resolve(row);
+    });
+});
+
+// Helper function to save/update user in DB
+const saveUser = (user) => new Promise((resolve, reject) => {
+    db.run(`
+        INSERT INTO users (email, isArcPlus, stripeCustomerId, stripeSubscriptionId)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(email) DO UPDATE SET
+            isArcPlus = excluded.isArcPlus,
+            stripeCustomerId = excluded.stripeCustomerId,
+            stripeSubscriptionId = excluded.stripeSubscriptionId
+    `, [user.email, user.isArcPlus, user.stripeCustomerId, user.stripeSubscriptionId], (err) => {
+        if (err) return reject(err);
+        resolve();
+    });
+});
 
 // Login or register user
 app.post('/login', async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).send('Email is required');
 
-    let user = await User.findOne({ email });
+    let user = await getUserByEmail(email);
     if (!user) {
-        user = await User.create({ email });
+        user = { email, isArcPlus: 0 };
+        await saveUser(user);
     }
     req.session.user = user;
     res.json({ message: 'Logged in', user });
@@ -49,7 +74,7 @@ app.post('/login', async (req, res) => {
 app.post('/create-payment', async (req, res) => {
     if (!req.session.user) return res.status(403).send('User not logged in');
 
-    let user = await User.findById(req.session.user._id);
+    const user = await getUserByEmail(req.session.user.email);
     if (user.isArcPlus) return res.status(400).send('Already subscribed');
 
     // Create Stripe customer if not exists
@@ -67,7 +92,7 @@ app.post('/create-payment', async (req, res) => {
             price_data: {
                 currency: 'gbp',
                 product_data: { name: 'arc-plus Access' },
-                unit_amount: 50, // 50 pence
+                unit_amount: 50,
                 recurring: { interval: 'week' },
             },
             quantity: 1
@@ -76,7 +101,8 @@ app.post('/create-payment', async (req, res) => {
         cancel_url: `${req.headers.origin}/?canceled=true`,
     });
 
-    await user.save();
+    // Save session details to user
+    await saveUser(user);
     res.json({ id: session.id });
 });
 
@@ -86,12 +112,8 @@ app.post('/api/arc-core', async (req, res) => {
 
     try {
         const response = await axios.post(
-            'https://api.openai.com/v1/chat/completions',
-            { 
-                model: "gpt-4-turbo-mini", 
-                messages: [{ role: "user", content: req.body.prompt }],
-                max_tokens: 50 
-            },
+            'https://api.openai.com/v1/engines/gpt-4-turbo-mini/completions',
+            { prompt: req.body.prompt, max_tokens: 50 },
             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
         );
         res.json(response.data);
@@ -102,17 +124,13 @@ app.post('/api/arc-core', async (req, res) => {
 
 // Route for Arc-Plus (GPT-4-turbo)
 app.post('/api/arc-plus', async (req, res) => {
-    const user = await User.findById(req.session.user._id);
+    const user = await getUserByEmail(req.session.user.email);
     if (!user || !user.isArcPlus) return res.status(403).send('Arc-Plus access required');
 
     try {
         const response = await axios.post(
-            'https://api.openai.com/v1/chat/completions',
-            { 
-                model: "gpt-4-turbo", 
-                messages: [{ role: "user", content: req.body.prompt }],
-                max_tokens: 50 
-            },
+            'https://api.openai.com/v1/engines/gpt-4-turbo/completions',
+            { prompt: req.body.prompt, max_tokens: 50 },
             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
         );
         res.json(response.data);
@@ -121,39 +139,8 @@ app.post('/api/arc-plus', async (req, res) => {
     }
 });
 
-// Stripe Webhook to update subscription status
-app.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-
-    try {
-        const event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-
-        if (event.type === 'checkout.session.completed') {
-            const session = event.data.object;
-            const user = await User.findOne({ stripeCustomerId: session.customer });
-            if (user) {
-                user.isArcPlus = true;
-                user.stripeSubscriptionId = session.subscription;
-                await user.save();
-            }
-        } else if (event.type === 'customer.subscription.deleted') {
-            const subscription = event.data.object;
-            const user = await User.findOne({ stripeSubscriptionId: subscription.id });
-            if (user) {
-                user.isArcPlus = false;
-                user.stripeSubscriptionId = null;
-                await user.save();
-            }
-        }
-
-        res.send({ received: true });
-    } catch (err) {
-        res.status(400).send(`Webhook error: ${err.message}`);
-    }
-});
-
 // Serve the HTML file
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
